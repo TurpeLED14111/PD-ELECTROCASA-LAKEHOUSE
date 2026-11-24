@@ -1,6 +1,8 @@
 from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
+CATALOGO = spark.conf.get("catalogo", "electrocasa_dev")
+
 # ==============================================================================
 # PREGUNTA 1: Ventas netas por sucursal y mes (marzo a octubre 2026)
 # ==============================================================================
@@ -201,4 +203,52 @@ def gold_p6_despachos():
             .otherwise(F.lit(0.0))
         )
         .orderBy("courier")
+    )
+
+# ==============================================================================
+# EVIDENCIA DE MASKING: empleados vigentes (tabla derivada de silver.empleados)
+# La máscara se vuelve a declarar en el schema: así ingeniería ve los valores reales
+# y analistas/auditoría (que tienen SELECT sobre gold) ven '***' y NULL.
+# ==============================================================================
+@dp.materialized_view(
+    name="gold.empleados_vigentes",
+    comment="Versión vigente de cada empleado activo (derivada de silver.empleados, con MASK en dni y salario)",
+    schema=f"""
+        id_empleado STRING,
+        nombre STRING,
+        dni STRING MASK {CATALOGO}.default.mask_dni,
+        salario DECIMAL(12,2) MASK {CATALOGO}.default.mask_salario,
+        sucursal_id STRING,
+        cargo STRING,
+        fecha_evento DATE
+    """
+)
+def gold_empleados_vigentes():
+    return (
+        dp.read("silver.empleados")
+        .filter("__END_AT IS NULL AND tipo_evento != 'BAJA'")
+        .select("id_empleado", "nombre", "dni", "salario", "sucursal_id", "cargo", "fecha_evento")
+    )
+
+# ==============================================================================
+# RETO VARIANT: reseñas negativas por origen (app / web / kiosko) y mes
+# ==============================================================================
+@dp.materialized_view(name="gold.resenas_negativas_origen", comment="Reto VARIANT: % de reseñas negativas por origen (metadata:origen) y mes")
+def gold_resenas_origen():
+    res = (
+        dp.read("silver.resenas")
+        .filter("fecha_resena >= '2026-03-01' AND fecha_resena < '2026-11-01'")
+        .withColumn("mes", F.date_format("fecha_resena", "yyyy-MM"))
+        .withColumn("origen", F.coalesce(F.expr("metadata:origen::string"), F.lit("desconocido")))
+    )
+    cat = dp.read("silver.catalogo").select("producto_id")
+    return (
+        res.join(cat, "producto_id", "inner")
+        .groupBy("origen", "mes")
+        .agg(
+            F.count("*").alias("total_resenas"),
+            F.sum(F.when(F.col("calificacion").isin(1, 2), 1).otherwise(0)).alias("resenas_negativas")
+        )
+        .withColumn("porcentaje_negativas", F.round((F.col("resenas_negativas") / F.col("total_resenas")) * 100, 2))
+        .orderBy("mes", "origen")
     )

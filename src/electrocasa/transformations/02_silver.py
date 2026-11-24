@@ -165,10 +165,17 @@ def limpiar_tracking_base():
         .when(est.like("%devol%") | est.like("%devuel%"), "devuelto")
         .otherwise("desconocido")
     )
+    cour = F.lower(F.trim(F.col("courier")))
+    courier_std = (
+        F.when(cour.like("%olva%"), "Olva Courier")
+        .when(cour.like("%shalom%"), "Shalom")
+        .when(cour.like("%servientrega%"), "Servientrega")
+        .otherwise(F.initcap(F.trim(F.col("courier"))))
+    )
     return (
         df.withColumn("tracking_id", F.trim(F.col("tracking_id")))
         .withColumn("venta_id", F.trim(F.col("venta_id")))
-        .withColumn("courier", F.initcap(F.trim(F.col("courier"))))
+        .withColumn("courier", courier_std)
         .withColumn("estado_entrega", est_std)
         .withColumn("sucursal_origen", F.trim(F.col("sucursal_origen")))
     )
@@ -177,7 +184,9 @@ def limpiar_tracking_base():
 @dp.expect_or_drop("estado_conocido", "evento_id IS NOT NULL AND estado_entrega IN ('pendiente', 'en_transito', 'entregado', 'devuelto')")
 def silver_tracking():
     df = limpiar_tracking_base().filter("evento_id IS NOT NULL AND estado_entrega IN ('pendiente', 'en_transito', 'entregado', 'devuelto')")
-    w = Window.partitionBy("tracking_id", "estado_entrega", "fecha_modificacion").orderBy(F.col("evento_id").asc())
+    # Un mensaje reprocesado es el mismo cambio de estado con otro evento_id y otra fecha_modificacion
+    # (es el momento en que entró a la base). Se conserva el primer registro de cada estado por envío.
+    w = Window.partitionBy("tracking_id", "estado_entrega").orderBy(F.col("fecha_modificacion").asc(), F.col("evento_id").asc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
 
 # ==============================================================================
@@ -300,10 +309,6 @@ def silver_cuarentena():
     )
     q_devoluciones = (
         dp.read("vw_devoluciones_enriquecidas")
-        .filter("devolucion_id IS NULL OR venta_id IS NULL OR monto_venta_origen IS NULL OR monto_reembolso IS NULL OR monto_reembolso < 0 OR monto_reembolso > monto_venta_origen OR fecha_devolucion IS NULL")
-        .select(
-            F.lit("devolucion_id").alias("devolucion_id_tmp")
-        ) if False else dp.read("vw_devoluciones_enriquecidas")
         .filter("devolucion_id IS NULL OR venta_id IS NULL OR monto_venta_origen IS NULL OR monto_reembolso IS NULL OR monto_reembolso < 0 OR monto_reembolso > monto_venta_origen OR fecha_devolucion IS NULL")
         .select(
             F.lit("devoluciones").alias("fuente"),

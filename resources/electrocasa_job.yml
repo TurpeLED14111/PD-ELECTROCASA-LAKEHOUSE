@@ -2,14 +2,33 @@ resources:
   jobs:
     electrocasa_orquestacion:
       name: electrocasa_orquestacion_${bundle.target}
+
+      trigger:
+        file_arrival:
+          url: /Volumes/${var.catalogo}/default/vol_landing/
+          min_time_between_triggers_seconds: 300
+          wait_after_last_change_seconds: 120
+
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+        on_success:
+          - ${var.alert_email}
+
+      max_concurrent_runs: 1
+
       tasks:
         - task_key: tarea_1_copy_into
+          max_retries: 2
+          min_retry_interval_millis: 60000
           notebook_task:
             notebook_path: ../notebooks/01_copy_into_bronze.ipynb
             base_parameters:
               catalogo: ${var.catalogo}
 
         - task_key: tarea_2_ingest_tracking
+          max_retries: 2
+          min_retry_interval_millis: 60000
           pipeline_task:
             pipeline_id: ${var.tracking_pipeline_id}
 
@@ -17,12 +36,16 @@ resources:
           depends_on:
             - task_key: tarea_1_copy_into
             - task_key: tarea_2_ingest_tracking
+          max_retries: 1
+          min_retry_interval_millis: 120000
           pipeline_task:
             pipeline_id: ${resources.pipelines.electrocasa_medallion.id}
 
+        # Sin reintentos: si falla es porque una tabla quedó vacía, y reintentar no lo arregla.
         - task_key: tarea_4_validacion
           depends_on:
             - task_key: tarea_3_pipeline_medallion
+          max_retries: 0
           notebook_task:
             notebook_path: ../notebooks/02_validacion.ipynb
             base_parameters:

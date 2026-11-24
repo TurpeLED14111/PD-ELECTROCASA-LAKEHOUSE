@@ -51,8 +51,9 @@ reglas_de_calidad:
     justificacion: "Estados fuera del conjunto cerrado impiden calcular tiempos de entrega y porcentaje de devueltos en Gold"
 
 transformaciones_silver:
-  - "Estandarizar variantes de estado_entrega ('En camino', 'EN_CAMINO', 'en_transito' -> 'en_transito') y casing de courier"
-  - "Eliminar mensajes reprocesados deduplicando por (tracking_id, estado_entrega, fecha_modificacion) conservando el primer evento_id"
+  - "Estandarizar variantes de estado_entrega ('En camino', 'EN_CAMINO', 'en_transito' -> 'en_transito')"
+  - "Estandarizar courier a un conjunto cerrado: 'Olva' / 'OLVA COURIER' -> 'Olva Courier', 'Shalom', 'Servientrega'"
+  - "Eliminar mensajes reprocesados deduplicando por (tracking_id, estado_entrega) y conservando el primer registro por fecha_modificacion (el reproceso trae otro evento_id y otra fecha_modificacion)"
 
 problemas_conocidos:
   - problema: "Casing inconsistente en courier y estado_entrega; mensajes reprocesados con distinto evento_id; fecha_actualizacion nula"

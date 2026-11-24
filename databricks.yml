@@ -8,6 +8,9 @@ variables:
   tracking_pipeline_id:
     description: ID del pipeline de Lakeflow Connect para dbo.TrackingEnvios
     default: "c2ea1eb1-b9f1-4134-9276-6a3ffdfa76be"
+  alert_email:
+    description: Correo que recibe las alertas del job
+    default: rensoturpolb@gmail.com
   is_dev:
     description: Activa modo desarrollo en el pipeline
     default: true
