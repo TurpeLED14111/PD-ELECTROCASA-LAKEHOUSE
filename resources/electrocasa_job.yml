@@ -1,0 +1,29 @@
+resources:
+  jobs:
+    electrocasa_orquestacion:
+      name: electrocasa_orquestacion_${bundle.target}
+      tasks:
+        - task_key: tarea_1_copy_into
+          notebook_task:
+            notebook_path: ../notebooks/01_copy_into_bronze.ipynb
+            base_parameters:
+              catalogo: ${var.catalogo}
+
+        - task_key: tarea_2_ingest_tracking
+          pipeline_task:
+            pipeline_id: ${var.tracking_pipeline_id}
+
+        - task_key: tarea_3_pipeline_medallion
+          depends_on:
+            - task_key: tarea_1_copy_into
+            - task_key: tarea_2_ingest_tracking
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.electrocasa_medallion.id}
+
+        - task_key: tarea_4_validacion
+          depends_on:
+            - task_key: tarea_3_pipeline_medallion
+          notebook_task:
+            notebook_path: ../notebooks/02_validacion.ipynb
+            base_parameters:
+              catalogo: ${var.catalogo}
