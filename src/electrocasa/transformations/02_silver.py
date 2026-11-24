@@ -4,24 +4,6 @@ from pyspark.sql.window import Window
 
 CATALOGO = spark.conf.get("catalogo", "electrocasa_dev")
 
-# Helper para parsear montos con coma decimal (1.234,50) o prefijos de moneda (S/ 1,299.90)
-def limpiar_decimal(col_name):
-    c = F.regexp_replace(F.trim(F.col(col_name)), r"[^0-9,.\-]", "")
-    # Si tiene coma como decimal (ej. 1.234,50 o 45,90)
-    c_norm = F.when(
-        c.rlike(r",\d{1,2}$"),
-        F.regexp_replace(F.regexp_replace(c, r"\.", ""), ",", ".")
-    ).otherwise(F.regexp_replace(c, ",", ""))
-    return F.expr(f"try_cast({c_norm._jc.toString()} as decimal(12,2))") if False else c_norm.cast("decimal(12,2)")
-
-def parsear_monto(col_expr):
-    c = F.regexp_replace(F.trim(col_expr), r"[^0-9,.\-]", "")
-    c_norm = F.when(
-        c.rlike(r",\d{1,2}$"),
-        F.regexp_replace(F.regexp_replace(c, r"\.", ""), ",", ".")
-    ).otherwise(F.regexp_replace(c, ",", ""))
-    return F.expr(f"try_cast(nullif(trim({col_expr._jc.toString()}), '') as string)")
-
 def monto_seguro(col_name):
     raw = F.regexp_replace(F.trim(F.col(col_name)), r"[^0-9,.\-]", "")
     norm = F.when(
@@ -31,12 +13,11 @@ def monto_seguro(col_name):
     return F.when(norm.rlike(r"^-?\d+(\.\d+)?$"), norm.cast("decimal(12,2)")).otherwise(F.lit(None).cast("decimal(12,2)"))
 
 def fecha_segura(col_name):
-    c = F.trim(F.col(col_name))
     return F.coalesce(
-        F.expr(f"try_to_timestamp({col_name})"),
-        F.expr(f"try_to_timestamp({col_name}, 'dd/MM/yyyy')"),
-        F.expr(f"try_to_timestamp({col_name}, 'dd/MM/yyyy HH:mm:ss')"),
-        F.expr(f"try_to_timestamp({col_name}, 'yyyy-MM-dd')")
+        F.expr(f"try_to_timestamp(trim({col_name}))"),
+        F.expr(f"try_to_timestamp(trim({col_name}), 'dd/MM/yyyy')"),
+        F.expr(f"try_to_timestamp(trim({col_name}), 'dd/MM/yyyy HH:mm:ss')"),
+        F.expr(f"try_to_timestamp(trim({col_name}), 'yyyy-MM-dd')")
     )
 
 # ==============================================================================
@@ -53,7 +34,7 @@ def silver_sucursales():
         .withColumn("distrito", F.initcap(F.trim(F.col("distrito"))))
         .withColumn("ciudad", F.initcap(F.trim(F.col("ciudad"))))
         .withColumn("region", F.initcap(F.trim(F.col("region"))))
-        .withColumn("fecha_apertura", F.coalesce(F.expr("try_to_date(fecha_apertura)"), F.expr("try_to_date(fecha_apertura, 'dd/MM/yyyy')")))
+        .withColumn("fecha_apertura", F.coalesce(F.expr("try_to_date(trim(fecha_apertura))"), F.expr("try_to_date(trim(fecha_apertura), 'dd/MM/yyyy')")))
         .withColumn("_rn", F.row_number().over(w))
         .filter("_rn = 1")
         .drop("_rn", "_ingested_at", "_source_file")
@@ -77,7 +58,7 @@ def limpiar_catalogo_base():
         df.withColumn("producto_id", F.trim(F.col("producto_id")))
         .withColumn("nombre_producto", F.trim(F.col("nombre_producto")))
         .withColumn("categoria", cat_std)
-        .withColumn("marca", F.coalesce(F.nullif(F.trim(F.col("marca")), ""), F.lit("SIN_MARCA")))
+        .withColumn("marca", F.coalesce(F.nullif(F.trim(F.col("marca")), F.lit("")), F.lit("SIN_MARCA")))
         .withColumn("precio_lista", monto_seguro("precio_lista"))
         .withColumn("activo", F.when(F.lower(F.trim(F.col("activo"))).isin("true", "1", "si"), True).otherwise(False))
     )
@@ -86,7 +67,6 @@ def limpiar_catalogo_base():
 @dp.expect_or_drop("precio_valido", "producto_id IS NOT NULL AND precio_lista IS NOT NULL AND precio_lista > 0")
 def silver_catalogo():
     df = limpiar_catalogo_base().filter("producto_id IS NOT NULL AND precio_lista IS NOT NULL AND precio_lista > 0")
-    # Snapshot de agosto prevalece sobre marzo; dentro del mismo snapshot se deduplica por orden de ingesta
     w = Window.partitionBy("producto_id").orderBy(F.col("_source_file").desc(), F.col("_ingested_at").desc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn", "_ingested_at", "_source_file")
 
@@ -107,9 +87,9 @@ def limpiar_ventas_base():
     canal_std = F.when(F.lower(F.trim(F.col("canal"))).like("%ecom%"), "ECOMMERCE").otherwise("TIENDA_FISICA")
     return (
         df.withColumn("venta_id", F.trim(F.col("venta_id")))
-        .withColumn("sucursal_id", F.nullif(F.trim(F.col("sucursal_id")), ""))
+        .withColumn("sucursal_id", F.nullif(F.trim(F.col("sucursal_id")), F.lit("")))
         .withColumn("producto_id", F.trim(F.col("producto_id")))
-        .withColumn("vendedor_id", F.nullif(F.trim(F.col("vendedor_id")), ""))
+        .withColumn("vendedor_id", F.nullif(F.trim(F.col("vendedor_id")), F.lit("")))
         .withColumn("cantidad", F.when(F.trim(F.col("cantidad")).rlike(r"^-?\d+$"), F.trim(F.col("cantidad")).cast("int")).otherwise(F.lit(None).cast("int")))
         .withColumn("monto_total", monto_seguro("monto_total"))
         .withColumn("metodo_pago", mp_std)
@@ -132,10 +112,10 @@ def vw_devoluciones_enriquecidas():
     dev = (
         spark.read.table("bronze.devoluciones")
         .withColumn("devolucion_id", F.trim(F.col("devolucion_id")))
-        .withColumn("venta_id", F.nullif(F.trim(F.col("venta_id")), ""))
+        .withColumn("venta_id", F.nullif(F.trim(F.col("venta_id")), F.lit("")))
         .withColumn("sucursal_id", F.trim(F.col("sucursal_id")))
         .withColumn("producto_id", F.trim(F.col("producto_id")))
-        .withColumn("motivo", F.coalesce(F.nullif(F.trim(F.col("motivo")), ""), F.lit("NO_ESPECIFICADO")))
+        .withColumn("motivo", F.coalesce(F.nullif(F.trim(F.col("motivo")), F.lit("")), F.lit("NO_ESPECIFICADO")))
         .withColumn("monto_reembolso", monto_seguro("monto_reembolso"))
         .withColumn("fecha_devolucion", fecha_segura("fecha_devolucion"))
     )
@@ -149,8 +129,7 @@ def silver_devoluciones():
         "devolucion_id IS NOT NULL AND venta_id IS NOT NULL AND monto_venta_origen IS NOT NULL AND monto_reembolso >= 0 AND monto_reembolso <= monto_venta_origen AND fecha_devolucion IS NOT NULL"
     )
     w = Window.partitionBy("devolucion_id").orderBy(F.col("_ingested_at").asc())
-    return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn", "monto_venta_origen", "_ingested_at", "_source_file")
-
+    return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn", "_ingested_at", "_source_file")
 # ==============================================================================
 # 5. RESEÑAS (Con VARIANT en metadata)
 # ==============================================================================
@@ -159,8 +138,8 @@ def limpiar_resenas_base():
     return (
         df.withColumn("resena_id", F.trim(F.col("resena_id")))
         .withColumn("producto_id", F.trim(F.col("producto_id")))
-        .withColumn("cliente_id", F.nullif(F.trim(F.col("cliente_id")), ""))
-        .withColumn("comentario", F.nullif(F.trim(F.col("comentario")), ""))
+        .withColumn("cliente_id", F.nullif(F.trim(F.col("cliente_id")), F.lit("")))
+        .withColumn("comentario", F.nullif(F.trim(F.col("comentario")), F.lit("")))
         .withColumn("tags", F.coalesce(F.col("tags"), F.array().cast("array<string>")))
         .withColumn("fecha_resena", fecha_segura("fecha_resena"))
         .withColumn("metadata", F.expr("try_parse_json(metadata)"))
@@ -198,7 +177,6 @@ def limpiar_tracking_base():
 @dp.expect_or_drop("estado_conocido", "evento_id IS NOT NULL AND estado_entrega IN ('pendiente', 'en_transito', 'entregado', 'devuelto')")
 def silver_tracking():
     df = limpiar_tracking_base().filter("evento_id IS NOT NULL AND estado_entrega IN ('pendiente', 'en_transito', 'entregado', 'devuelto')")
-    # Elimina mensajes reprocesados: mismo tracking_id + estado + fecha_modificacion con distinto evento_id
     w = Window.partitionBy("tracking_id", "estado_entrega", "fecha_modificacion").orderBy(F.col("evento_id").asc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
 
@@ -218,15 +196,14 @@ def vw_empleados_limpios():
         .otherwise("OTRO")
     )
     sal = monto_seguro("salario")
-    # Corrección de orden de magnitud fuera de rango (ej. 150000 -> 1500.00 si excede 50,000)
     sal_norm = F.when(sal > 50000, (sal / 100).cast("decimal(12,2)")).otherwise(sal)
-    f_ev = F.coalesce(F.expr("try_to_date(fecha_evento)"), F.expr("try_to_date(fecha_evento, 'dd/MM/yyyy')"))
+    f_ev = F.coalesce(F.expr("try_to_date(trim(fecha_evento))"), F.expr("try_to_date(trim(fecha_evento), 'dd/MM/yyyy')"))
     f_reg = fecha_segura("fecha_registro")
 
     return (
-        df.withColumn("id_empleado", F.nullif(F.trim(F.col("id_empleado")), ""))
+        df.withColumn("id_empleado", F.nullif(F.trim(F.col("id_empleado")), F.lit("")))
         .withColumn("nombre", F.initcap(F.trim(F.col("nombre"))))
-        .withColumn("dni", F.nullif(F.trim(F.col("dni")), ""))
+        .withColumn("dni", F.nullif(F.trim(F.col("dni")), F.lit("")))
         .withColumn("email", F.lower(F.trim(F.col("email"))))
         .withColumn("salario", sal_norm)
         .withColumn("sucursal_id", F.trim(F.col("sucursal_id")))
@@ -235,7 +212,6 @@ def vw_empleados_limpios():
         .withColumn("fecha_evento", f_ev)
         .withColumn("fecha_registro", F.coalesce(f_reg, f_ev.cast("timestamp")))
         .filter("id_empleado IS NOT NULL AND fecha_evento IS NOT NULL")
-        # Secuencia determinística usando columnas de origen (nunca current_timestamp())
         .withColumn("_seq_orden", F.struct(F.col("fecha_evento"), F.col("fecha_registro")))
         .select("id_empleado", "nombre", "dni", "email", "salario", "sucursal_id", "cargo", "tipo_evento", "fecha_evento", "fecha_registro", "_seq_orden")
     )
@@ -299,7 +275,7 @@ def silver_cuarentena():
     )
     q_empleados = (
         spark.read.table("bronze.empleados")
-        .withColumn("f_ev", F.coalesce(F.expr("try_to_date(fecha_evento)"), F.expr("try_to_date(fecha_evento, 'dd/MM/yyyy')")))
+        .withColumn("f_ev", F.coalesce(F.expr("try_to_date(trim(fecha_evento))"), F.expr("try_to_date(trim(fecha_evento), 'dd/MM/yyyy')")))
         .filter("trim(id_empleado) IS NULL OR trim(id_empleado) = '' OR f_ev IS NULL")
         .select(
             F.lit("empleados").alias("fuente"),
@@ -324,6 +300,10 @@ def silver_cuarentena():
     )
     q_devoluciones = (
         dp.read("vw_devoluciones_enriquecidas")
+        .filter("devolucion_id IS NULL OR venta_id IS NULL OR monto_venta_origen IS NULL OR monto_reembolso IS NULL OR monto_reembolso < 0 OR monto_reembolso > monto_venta_origen OR fecha_devolucion IS NULL")
+        .select(
+            F.lit("devolucion_id").alias("devolucion_id_tmp")
+        ) if False else dp.read("vw_devoluciones_enriquecidas")
         .filter("devolucion_id IS NULL OR venta_id IS NULL OR monto_venta_origen IS NULL OR monto_reembolso IS NULL OR monto_reembolso < 0 OR monto_reembolso > monto_venta_origen OR fecha_devolucion IS NULL")
         .select(
             F.lit("devoluciones").alias("fuente"),
