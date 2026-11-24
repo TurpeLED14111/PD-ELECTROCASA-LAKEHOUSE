@@ -1,0 +1,75 @@
+fuente: empleados
+version: 1
+ultima_actualizacion: "2026-11-23"
+responsable: recursos_humanos
+llegada: "archivos CSV de eventos por lote en /Volumes/electrocasa_dev/default/vol_landing/empleados/"
+metodo_ingesta: "Auto Loader (cloudFiles en Lakeflow Declarative Pipeline) para capturar cada lote de eventos de RR.HH. de forma incremental"
+frecuencia_esperada: "por_lote"
+tabla_bronze: "electrocasa_dev.bronze.empleados"
+tabla_silver: "electrocasa_dev.silver.empleados"
+llave_evento: "id_empleado + fecha_evento + fecha_registro + tipo_evento"
+llave_entidad: "id_empleado"
+historizacion:
+  tipo: "SCD Type 2"
+  implementacion: "AUTO CDC (stored_as_scd_type=2) en Lakeflow Declarative Pipeline"
+  columnas_de_vigencia: ["__START_AT", "__END_AT"]
+  orden_de_los_cambios: "struct(fecha_evento, fecha_registro) proveniente de la fuente (nunca current_timestamp())"
+  eventos_mismo_dia: "Se desempata con fecha_registro que indica que evento cargo RR.HH. primero"
+  llegada_tardia: "Al secuenciar por fecha_evento y fecha_registro, los eventos tardios (ej. de junio-agosto que llegan en octubre) se ubican en su fecha real"
+
+columnas:
+  - nombre: id_empleado
+    tipo: "string"
+    nulo: false
+  - nombre: nombre
+    tipo: "string"
+    nulo: false
+  - nombre: dni
+    tipo: "string"
+    nulo: true
+    sensible: true
+    masking: "Funcion default.mask_dni: muestra valor real solo a electrocasa_ingenieria, resto ve '***'"
+  - nombre: email
+    tipo: "string"
+    nulo: true
+  - nombre: salario
+    tipo: "decimal(12,2)"
+    nulo: false
+    regla: "mayor a 0 y dentro de rango razonable"
+    sensible: true
+    masking: "Funcion default.mask_salario: muestra valor real solo a electrocasa_ingenieria, resto ve NULL"
+  - nombre: sucursal_id
+    tipo: "string"
+    nulo: false
+  - nombre: cargo
+    tipo: "string"
+    nulo: false
+  - nombre: tipo_evento
+    tipo: "string"
+    nulo: false
+    valores_permitidos: ["ALTA", "TRANSFERENCIA", "CAMBIO_SUELDO", "BAJA"]
+  - nombre: fecha_evento
+    tipo: "date"
+    nulo: false
+  - nombre: fecha_registro
+    tipo: "timestamp"
+    nulo: false
+
+reglas_de_calidad:
+  - nombre: evento_ubicable
+    condicion: "id_empleado IS NOT NULL AND fecha_evento IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "electrocasa_dev.silver.cuarentena"
+    justificacion: "Sin id_empleado o fecha_evento es imposible ubicar el evento en la historia SCD Type 2"
+
+transformaciones_silver:
+  - "Estandarizar las 13 variantes de tipo_evento (incluyendo 'cese' como 'BAJA') al conjunto cerrado"
+  - "Normalizar fecha_evento a DATE y fecha_registro a TIMESTAMP"
+  - "Corregir o enviar a cuarentena salarios con orden de magnitud fuera de rango y conservar empleados aunque tengan dni duplicado o nulo"
+  - "Aplicar clausula MASK en el schema de Silver sobre dni y salario"
+
+problemas_conocidos:
+  - problema: "13 formas de escribir tipo_evento; dos eventos el mismo dia; llegadas tardias en lote 3; dni vacios o repetidos en dos empleados; salarios fuera de rango"
+    ejemplo: "tipo_evento='cese'/'Baja', fecha_evento vacia"
+    filas_afectadas: "Detectadas al explorar Lote 1 (2.257 filas crudas)"
+    tratamiento: "Descarte a cuarentena si falta id_empleado o fecha_evento; ordenamiento por (fecha_evento, fecha_registro) en AUTO CDC"

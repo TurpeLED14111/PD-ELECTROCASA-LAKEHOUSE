@@ -1,0 +1,47 @@
+fuente: sucursales
+version: 1
+ultima_actualizacion: "2026-11-23"
+responsable: operaciones_y_expansion
+llegada: "archivo CSV unico en /Volumes/electrocasa_dev/default/vol_landing/sucursales/"
+metodo_ingesta: "COPY INTO en tarea SQL del Job hacia tabla Delta Bronze por ser una tabla maestra estatica de 40 filas"
+frecuencia_esperada: "unica_o_bajo_demanda"
+tabla_bronze: "electrocasa_dev.bronze.sucursales"
+tabla_silver: "electrocasa_dev.silver.sucursales"
+llave: "sucursal_id"
+
+columnas:
+  - nombre: sucursal_id
+    tipo: "string"
+    nulo: false
+  - nombre: nombre_sucursal
+    tipo: "string"
+    nulo: false
+  - nombre: distrito
+    tipo: "string"
+    nulo: false
+  - nombre: ciudad
+    tipo: "string"
+    nulo: false
+  - nombre: region
+    tipo: "string"
+    nulo: false
+  - nombre: fecha_apertura
+    tipo: "date"
+    nulo: false
+
+reglas_de_calidad:
+  - nombre: sucursal_valida
+    condicion: "sucursal_id IS NOT NULL AND nombre_sucursal IS NOT NULL"
+    politica: "fail"
+    destino_rechazos: "electrocasa_dev.silver.cuarentena"
+    justificacion: "Tabla maestra critica de 40 sucursales; si falla su llave primaria debe detenerse el pipeline"
+
+transformaciones_silver:
+  - "Normalizar el casing de ciudad usando initcap(trim(ciudad))"
+  - "Convertir fecha_apertura a DATE y deduplicar por sucursal_id"
+
+problemas_conocidos:
+  - problema: "Casing inconsistente en ciudad en dos filas"
+    ejemplo: "ciudad='LIMA' o 'lima'"
+    filas_afectadas: "2 filas de 40"
+    tratamiento: "Normalizacion con initcap(trim(ciudad)) en Silver"

@@ -1,0 +1,63 @@
+fuente: ventas
+version: 1
+ultima_actualizacion: "2026-11-23"
+responsable: area_comercial
+llegada: "archivos CSV por lote en /Volumes/electrocasa_dev/default/vol_landing/ventas/"
+metodo_ingesta: "Auto Loader (cloudFiles en Lakeflow Declarative Pipeline) por llegada incremental en lotes y volumen creciente"
+frecuencia_esperada: "por_lote"
+tabla_bronze: "electrocasa_dev.bronze.ventas"
+tabla_silver: "electrocasa_dev.silver.ventas"
+llave: "venta_id"
+
+columnas:
+  - nombre: venta_id
+    tipo: "string"
+    nulo: false
+  - nombre: sucursal_id
+    tipo: "string"
+    nulo: false
+  - nombre: producto_id
+    tipo: "string"
+    nulo: false
+    regla: "se conserva en Silver; en Gold se excluye si no existe en catalogo cuando se cruce por producto"
+  - nombre: vendedor_id
+    tipo: "string"
+    nulo: true
+  - nombre: cantidad
+    tipo: "int"
+    nulo: false
+    regla: "mayor a 0"
+  - nombre: monto_total
+    tipo: "decimal(12,2)"
+    nulo: false
+    regla: "mayor a 0 despues de normalizar separadores decimales"
+  - nombre: metodo_pago
+    tipo: "string"
+    nulo: false
+    valores_permitidos: ["EFECTIVO", "TARJETA_CREDITO", "TARJETA_DEBITO", "TRANSFERENCIA", "BILLETERA_DIGITAL"]
+  - nombre: fecha_venta
+    tipo: "timestamp"
+    nulo: false
+  - nombre: canal
+    tipo: "string"
+    nulo: false
+    valores_permitidos: ["TIENDA_FISICA", "ECOMMERCE"]
+
+reglas_de_calidad:
+  - nombre: monto_positivo
+    condicion: "monto_total > 0 AND cantidad > 0 AND venta_id IS NOT NULL AND sucursal_id IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "electrocasa_dev.silver.cuarentena"
+    justificacion: "Ventas con monto <= 0, cantidad 0 o sin sucursal/ID distorsionan las ventas netas y el ticket promedio en Gold"
+
+transformaciones_silver:
+  - "Normalizar monto_total convirtiendo coma decimal y punto de miles (ej. 1.234,50) a decimal(12,2)"
+  - "Unificar fecha_venta (formatos yyyy-MM-dd, dd/MM/yyyy e ISO timestamp) a TIMESTAMP usando try_to_timestamp"
+  - "Estandarizar las 17 variantes de metodo_pago a 5 valores canonicos y normalizar canal"
+  - "Deduplicar ventas identicas reingresadas en lotes posteriores conservando una fila por venta_id"
+
+problemas_conocidos:
+  - problema: "monto_total con coma decimal (1.234,50), negativo, cero o vacio; cantidad en cero; 17 variantes de metodo_pago; 3 formatos de fecha"
+    ejemplo: "monto_total='1.234,50', metodo_pago='EFV'/'Yape'/'TC', fecha_venta='07/06/2026'"
+    filas_afectadas: "Detectadas al explorar Lote 1 (6.783 filas crudas)"
+    tratamiento: "Normalizacion de texto/fechas antes de castear y descarte a silver.cuarentena de montos/cantidades invalidos"

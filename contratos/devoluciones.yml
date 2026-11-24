@@ -1,0 +1,56 @@
+fuente: devoluciones
+version: 1
+ultima_actualizacion: "2026-11-23"
+responsable: postventa_y_comercial
+llegada: "archivos CSV por lote en /Volumes/electrocasa_dev/default/vol_landing/devoluciones/"
+metodo_ingesta: "Auto Loader (cloudFiles en Lakeflow Declarative Pipeline) por llegada incremental en lotes"
+frecuencia_esperada: "por_lote"
+tabla_bronze: "electrocasa_dev.bronze.devoluciones"
+tabla_silver: "electrocasa_dev.silver.devoluciones"
+llave: "devolucion_id"
+depende_de:
+  - fuente: ventas
+    columna: venta_id
+
+columnas:
+  - nombre: devolucion_id
+    tipo: "string"
+    nulo: false
+  - nombre: venta_id
+    tipo: "string"
+    nulo: false
+    regla: "debe existir en silver.ventas"
+  - nombre: sucursal_id
+    tipo: "string"
+    nulo: false
+  - nombre: producto_id
+    tipo: "string"
+    nulo: false
+  - nombre: motivo
+    tipo: "string"
+    nulo: true
+  - nombre: monto_reembolso
+    tipo: "decimal(12,2)"
+    nulo: false
+    regla: "mayor o igual a 0 y menor o igual al monto_total de la venta de origen"
+  - nombre: fecha_devolucion
+    tipo: "timestamp"
+    nulo: false
+
+reglas_de_calidad:
+  - nombre: reembolso_valido
+    condicion: "monto_reembolso >= 0 AND venta_id IS NOT NULL AND monto_venta_origen IS NOT NULL AND monto_reembolso <= monto_venta_origen"
+    politica: "drop"
+    destino_rechazos: "electrocasa_dev.silver.cuarentena"
+    justificacion: "Devoluciones sin venta de origen o con reembolso superior a la venta original alteran las ventas netas"
+
+transformaciones_silver:
+  - "Normalizar monto_reembolso a decimal(12,2) y fecha_devolucion a TIMESTAMP"
+  - "Realizar LEFT JOIN con silver.ventas en una vista intermedia para validar existencia de venta_id y comparar montos"
+  - "Deduplicar devoluciones repetidas entre lotes por devolucion_id"
+
+problemas_conocidos:
+  - problema: "monto_reembolso negativo o mayor al monto de la venta original; venta_id vacio o inexistente; devoluciones repetidas"
+    ejemplo: "monto_reembolso > monto_total de venta, venta_id=null"
+    filas_afectadas: "Detectadas al explorar Lote 1 (1.387 filas crudas)"
+    tratamiento: "Join con silver.ventas en vista intermedia y envio de rechazos a cuarentena"

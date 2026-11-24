@@ -1,0 +1,53 @@
+fuente: catalogo
+version: 1
+ultima_actualizacion: "2026-11-23"
+responsable: area_producto_y_compras
+llegada: "archivos JSON (arreglo completo) en /Volumes/electrocasa_dev/default/vol_landing/catalogo/"
+metodo_ingesta: "COPY INTO en tarea SQL del Job hacia tabla Delta Bronze por ser snapshots completos de bajo volumen y baja frecuencia"
+frecuencia_esperada: "por_snapshot"
+tipo_entrega: "snapshot_completo"
+tabla_bronze: "electrocasa_dev.bronze.catalogo"
+tabla_silver: "electrocasa_dev.silver.catalogo"
+llave: "producto_id"
+historizacion: "Se conserva la version mas reciente por producto_id (snapshot agosto sobre marzo) y se mantienen los descontinuados con activo = false"
+
+columnas:
+  - nombre: producto_id
+    tipo: "string"
+    nulo: false
+  - nombre: nombre_producto
+    tipo: "string"
+    nulo: false
+  - nombre: categoria
+    tipo: "string"
+    nulo: false
+    valores_permitidos: ["LINEA_BLANCA", "COCINA", "ELECTRONICA", "CLIMATIZACION", "ENTRETENIMIENTO"]
+  - nombre: marca
+    tipo: "string"
+    nulo: true
+  - nombre: precio_lista
+    tipo: "decimal(12,2)"
+    nulo: false
+    regla: "numerico y mayor a 0"
+  - nombre: activo
+    tipo: "boolean"
+    nulo: false
+
+reglas_de_calidad:
+  - nombre: precio_valido
+    condicion: "precio_lista IS NOT NULL AND precio_lista > 0 AND producto_id IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "electrocasa_dev.silver.cuarentena"
+    justificacion: "Un producto sin identificador o con precio nulo, cero o negativo no es valido en el maestro"
+
+transformaciones_silver:
+  - "Limpiar prefijos de moneda ('S/ ') y separadores de miles en precio_lista antes de castear a decimal(12,2)"
+  - "Estandarizar las 17 variantes de categoria al conjunto cerrado de 5 categorias"
+  - "Reemplazar marca nula por 'SIN_MARCA' y castear activo a boolean"
+  - "Deduplicar productos repetidos dentro del snapshot de marzo y priorizar el snapshot mas reciente"
+
+problemas_conocidos:
+  - problema: "precio_lista como texto con moneda ('S/ 1,299.90'), negativo o nulo; 17 variantes de categoria; duplicados en snapshot de marzo"
+    ejemplo: "precio_lista='S/ 1,299.90', marca=null"
+    filas_afectadas: "Detectadas al explorar snapshot marzo (2.305 filas crudas)"
+    tratamiento: "Ingesta en Bronze con multiLine=true y primitivesAsString=true; limpieza y deduplicacion en Silver"

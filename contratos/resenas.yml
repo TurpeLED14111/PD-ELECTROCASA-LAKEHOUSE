@@ -1,0 +1,59 @@
+fuente: resenas
+version: 1
+ultima_actualizacion: "2026-11-23"
+responsable: atencion_al_cliente
+llegada: "archivos JSON Lines por lote en /Volumes/electrocasa_dev/default/vol_landing/resenas/"
+metodo_ingesta: "Auto Loader (cloudFiles formato json en Lakeflow Declarative Pipeline) para procesar archivos JSON Lines incrementales"
+frecuencia_esperada: "por_lote"
+tabla_bronze: "electrocasa_dev.bronze.resenas"
+tabla_silver: "electrocasa_dev.silver.resenas"
+llave: "resena_id"
+
+columnas:
+  - nombre: resena_id
+    tipo: "string"
+    nulo: false
+  - nombre: producto_id
+    tipo: "string"
+    nulo: false
+    regla: "se conserva en Silver; en Gold se excluyen reseñas de productos que no existen en el catalogo"
+  - nombre: cliente_id
+    tipo: "string"
+    nulo: true
+  - nombre: calificacion
+    tipo: "int"
+    nulo: false
+    regla: "entero entre 1 y 5"
+  - nombre: comentario
+    tipo: "string"
+    nulo: true
+  - nombre: tags
+    tipo: "array<string>"
+    nulo: false
+  - nombre: respuestas
+    tipo: "array<struct<autor:string,texto:string,fecha:string>>"
+    nulo: true
+  - nombre: fecha_resena
+    tipo: "timestamp"
+    nulo: false
+  - nombre: metadata
+    tipo: "variant"
+    nulo: true
+
+reglas_de_calidad:
+  - nombre: calificacion_en_escala
+    condicion: "calificacion BETWEEN 1 AND 5 AND resena_id IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "electrocasa_dev.silver.cuarentena"
+    justificacion: "Calificaciones 0, 6 o nulas no deben entrar ni en el numerador ni en el denominador de Gold"
+
+transformaciones_silver:
+  - "Parsear metadata con parse_json() a tipo VARIANT para soportar esquemas variables (app, web, kiosko)"
+  - "Convertir tags nulos en arreglo vacio array() y normalizar los dos formatos de fecha_resena a TIMESTAMP"
+  - "Deduplicar reseñas repetidas entre lotes por resena_id"
+
+problemas_conocidos:
+  - problema: "calificacion fuera de escala (0, 6 o nula); tags nulos; respuestas sin autor; 2 formatos de fecha; reseñas repetidas entre lotes"
+    ejemplo: "calificacion=0 o 6, tags=null"
+    filas_afectadas: "Detectadas al explorar Lote 1 (5.292 filas crudas)"
+    tratamiento: "Descarte a cuarentena de calificaciones invalidas y deduplicacion por resena_id"
