@@ -20,9 +20,7 @@ def fecha_segura(col_name):
         F.expr(f"try_to_timestamp(trim({col_name}), 'yyyy-MM-dd')")
     )
 
-# ==============================================================================
-# 1. SUCURSALES
-# ==============================================================================
+
 @dp.materialized_view(name="silver.sucursales", comment="Maestro limpio de 40 sucursales")
 @dp.expect_or_fail("sucursal_id_valido", "sucursal_id IS NOT NULL AND nombre_sucursal IS NOT NULL")
 def silver_sucursales():
@@ -40,9 +38,7 @@ def silver_sucursales():
         .drop("_rn", "_ingested_at", "_source_file")
     )
 
-# ==============================================================================
-# 2. CATÁLOGO DE PRODUCTOS
-# ==============================================================================
+
 def limpiar_catalogo_base():
     df = spark.read.table("bronze.catalogo")
     cat_upper = F.upper(F.translate(F.trim(F.col("categoria")), "áéíóúÁÉÍÓÚ", "aeiouAEIOU"))
@@ -70,9 +66,7 @@ def silver_catalogo():
     w = Window.partitionBy("producto_id").orderBy(F.col("_source_file").desc(), F.col("_ingested_at").desc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn", "_ingested_at", "_source_file")
 
-# ==============================================================================
-# 3. VENTAS
-# ==============================================================================
+
 def limpiar_ventas_base():
     df = spark.read.table("bronze.ventas")
     mp = F.upper(F.trim(F.col("metodo_pago")))
@@ -104,9 +98,7 @@ def silver_ventas():
     w = Window.partitionBy("venta_id").orderBy(F.col("_ingested_at").asc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn", "_ingested_at", "_source_file")
 
-# ==============================================================================
-# 4. DEVOLUCIONES (Validación cruzada con Ventas en vista intermedia)
-# ==============================================================================
+
 @dp.temporary_view(name="vw_devoluciones_enriquecidas")
 def vw_devoluciones_enriquecidas():
     dev = (
@@ -130,9 +122,7 @@ def silver_devoluciones():
     )
     w = Window.partitionBy("devolucion_id").orderBy(F.col("_ingested_at").asc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn", "_ingested_at", "_source_file")
-# ==============================================================================
-# 5. RESEÑAS (Con VARIANT en metadata)
-# ==============================================================================
+
 def limpiar_resenas_base():
     df = spark.read.table("bronze.resenas")
     return (
@@ -152,9 +142,7 @@ def silver_resenas():
     w = Window.partitionBy("resena_id").orderBy(F.col("_ingested_at").asc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn", "_ingested_at", "_source_file")
 
-# ==============================================================================
-# 6. TRACKING DE ENVÍOS (Estandarización y eliminación de mensajes reprocesados)
-# ==============================================================================
+
 def limpiar_tracking_base():
     df = spark.read.table("bronze.tracking_envios")
     est = F.lower(F.translate(F.trim(F.col("estado_entrega")), "áéíóúÁÉÍÓÚ", "aeiouAEIOU"))
@@ -189,9 +177,7 @@ def silver_tracking():
     w = Window.partitionBy("tracking_id", "estado_entrega").orderBy(F.col("fecha_modificacion").asc(), F.col("evento_id").asc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
 
-# ==============================================================================
-# 7. EMPLEADOS (SCD Type 2 con AUTO CDC y MASK en el schema)
-# ==============================================================================
+
 @dp.temporary_view(name="vw_empleados_limpios")
 @dp.expect_or_drop("evento_ubicable", "id_empleado IS NOT NULL AND fecha_evento IS NOT NULL")
 def vw_empleados_limpios():
@@ -253,9 +239,6 @@ dp.create_auto_cdc_flow(
     except_column_list=["_seq_orden"]
 )
 
-# ==============================================================================
-# 8. CUARENTENA CONSOLIDADA (Trazabilidad completa de registros rechazados)
-# ==============================================================================
 @dp.materialized_view(name="silver.cuarentena", comment="Registro auditable de filas rechazadas por reglas de calidad")
 def silver_cuarentena():
     q_ventas = (

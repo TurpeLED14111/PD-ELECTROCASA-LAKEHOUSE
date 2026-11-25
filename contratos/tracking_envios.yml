@@ -6,7 +6,7 @@ llegada: "Azure SQL Database, tabla dbo.TrackingEnvios"
 metodo_ingesta: "Conector query-based de SQL Server (Lakeflow Connect)"
 connection_unity_catalog: "conn_electrocasa_sql"
 cursor: fecha_modificacion
-modo_historia: "append_only para conservar cada cambio de estado cronologico de un mismo tracking_id"
+modo_historia: "SCD Type 1 (MERGE por evento_id). Cada cambio de estado conserva su propia fila porque la llave es evento_id; los reprocesados (otro evento_id) se eliminan en Silver"
 frecuencia_esperada: "por_ejecucion_de_job"
 tabla_bronze: "electrocasa_dev.bronze.tracking_envios"
 tabla_silver: "electrocasa_dev.silver.tracking_envios"

@@ -3,9 +3,7 @@ from pyspark.sql import functions as F
 
 CATALOGO = spark.conf.get("catalogo", "electrocasa_dev")
 
-# ==============================================================================
-# PREGUNTA 1: Ventas netas por sucursal y mes (marzo a octubre 2026)
-# ==============================================================================
+
 @dp.materialized_view(name="gold.ventas_netas_sucursal_mes", comment="P1: Ventas netas, devoluciones, cantidad y ticket promedio por sucursal y mes")
 def gold_p1_ventas_netas():
     ventas_mes = (
@@ -41,9 +39,7 @@ def gold_p1_ventas_netas():
         .orderBy("mes", "sucursal_id")
     )
 
-# ==============================================================================
-# PREGUNTA 2: Top 10 productos más vendidos y Top 10 mayor tasa de devolución
-# ==============================================================================
+
 @dp.materialized_view(name="gold.top_productos", comment="P2: Top 10 productos por unidades vendidas y Top 10 por tasa de devolución")
 def gold_p2_productos():
     v_prod = (
@@ -82,9 +78,7 @@ def gold_p2_productos():
     )
     return top_vendidos.unionByName(top_devueltos)
 
-# ==============================================================================
-# PREGUNTA 3: Dotación de empleados activos al último día de cada mes
-# ==============================================================================
+
 @dp.materialized_view(name="gold.dotacion_mensual", comment="P3: Empleados activos por sucursal al cierre de cada mes (marzo a octubre 2026)")
 def gold_p3_dotacion():
     cierres = spark.createDataFrame(
@@ -94,8 +88,7 @@ def gold_p3_dotacion():
     ).withColumn("fecha_corte", F.to_date("fecha_corte_str")).withColumn("mes", F.date_format("fecha_corte", "yyyy-MM"))
 
     emp = dp.read("silver.empleados")
-    # Una versión SCD2 está vigente en fecha_corte si su fecha_evento <= fecha_corte
-    # y la siguiente versión (__END_AT.fecha_evento) es nula o > fecha_corte, y el evento no es BAJA
+
     activos = (
         cierres.join(
             emp,
@@ -110,9 +103,7 @@ def gold_p3_dotacion():
     suc = dp.read("silver.sucursales").select("sucursal_id", "nombre_sucursal", "region")
     return activos.join(suc, "sucursal_id", "left").orderBy("mes", "sucursal_id")
 
-# ==============================================================================
-# PREGUNTA 4: Ventas por vendedor con sucursal histórica (Point-in-Time SCD2)
-# ==============================================================================
+
 @dp.materialized_view(name="gold.ventas_vendedor", comment="P4: Ventas de tienda física por vendedor y sucursal histórica en la fecha de venta")
 def gold_p4_ventas_vendedor():
     ventas_fis = (
@@ -141,9 +132,7 @@ def gold_p4_ventas_vendedor():
         .orderBy("mes", "sucursal_historica", F.col("monto_ventas").desc())
     )
 
-# ==============================================================================
-# PREGUNTA 5: Porcentaje de reseñas negativas (1 o 2) por categoría y mes
-# ==============================================================================
+
 @dp.materialized_view(name="gold.resenas_negativas", comment="P5: Porcentaje de reseñas negativas por categoría del catálogo y mes (con detalle de origen VARIANT)")
 def gold_p5_resenas():
     res = (
@@ -151,7 +140,6 @@ def gold_p5_resenas():
         .filter("fecha_resena >= '2026-03-01' AND fecha_resena < '2026-11-01'")
         .withColumn("mes", F.date_format("fecha_resena", "yyyy-MM"))
     )
-    # Inner join excluye del numerador y denominador productos que no existen en el catálogo
     cat = dp.read("silver.catalogo").select("producto_id", "categoria")
 
     return (
@@ -165,9 +153,7 @@ def gold_p5_resenas():
         .orderBy("mes", "categoria")
     )
 
-# ==============================================================================
-# PREGUNTA 6: Despachos por courier (tiempo promedio a entregado y % devueltos)
-# ==============================================================================
+
 @dp.materialized_view(name="gold.despachos_courier", comment="P6: Tiempo promedio de entrega en horas y porcentaje de envíos devueltos por courier")
 def gold_p6_despachos():
     trk = dp.read("silver.tracking_envios")
@@ -205,11 +191,7 @@ def gold_p6_despachos():
         .orderBy("courier")
     )
 
-# ==============================================================================
-# EVIDENCIA DE MASKING: empleados vigentes (tabla derivada de silver.empleados)
-# La máscara se vuelve a declarar en el schema: así ingeniería ve los valores reales
-# y analistas/auditoría (que tienen SELECT sobre gold) ven '***' y NULL.
-# ==============================================================================
+
 @dp.materialized_view(
     name="gold.empleados_vigentes",
     comment="Versión vigente de cada empleado activo (derivada de silver.empleados, con MASK en dni y salario)",
@@ -230,9 +212,7 @@ def gold_empleados_vigentes():
         .select("id_empleado", "nombre", "dni", "salario", "sucursal_id", "cargo", "fecha_evento")
     )
 
-# ==============================================================================
-# RETO VARIANT: reseñas negativas por origen (app / web / kiosko) y mes
-# ==============================================================================
+
 @dp.materialized_view(name="gold.resenas_negativas_origen", comment="Reto VARIANT: % de reseñas negativas por origen (metadata:origen) y mes")
 def gold_resenas_origen():
     res = (

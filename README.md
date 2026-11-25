@@ -88,7 +88,9 @@ databricks bundle run electrocasa_orquestacion -t dev
 | `dev` | `electrocasa_dev` | development |
 | `prod` | `electrocasa_prod` | production |
 
-**Evidencia de despliegue:** `![bundle deploy](img/bundle_deploy.png)` ⚠️ agregar captura
+**Evidencia de despliegue** (`databricks bundle deploy -t dev`):
+
+![bundle deploy](img/bundle_deploy.png)
 
 ---
 
@@ -114,7 +116,17 @@ databricks bundle run electrocasa_orquestacion -t dev
 
 `bronze.tracking_envios` se mantiene en **15 139 filas** en las corridas de los lotes 1, 2 y 3: el conector no vuelve a cargar los eventos.
 
-`![conector corrida 1](img/tracking_run1.png)` · `![conector corrida 2](img/tracking_run2.png)` ⚠️ agregar capturas
+**Evidencia:** `DESCRIBE HISTORY electrocasa_dev.bronze.tracking_envios`
+
+| Versión | Timestamp (UTC) | Operación | Métricas |
+|---|---|---|---|
+| 0 | 2026-11-24 03:21:34 | CREATE TABLE | — |
+| 1 | 2026-11-24 03:21:35 | DLT SETUP | pipeline `c2ea1eb1-…` |
+| 2 | 2026-11-24 03:21:57 | **MERGE** (`evento_id <=> evento_id`) | `numSourceRows = 15139`, `numTargetRowsInserted = 15139`, `numTargetRowsUpdated = 0` |
+
+- La primera corrida deja un `MERGE` con las 15 139 filas.
+- Las corridas siguientes del conector (una por cada corrida del job) **no agregan ninguna versión**: no hay filas con `fecha_modificacion` mayor al último valor leído.
+- Eso demuestra que la ingesta es incremental por el cursor y no una recarga completa.
 
 ---
 
@@ -163,7 +175,7 @@ Todos los rechazos van a **`silver.cuarentena`** con `fuente`, `regla_fallida`, 
 | Salarios fuera de rango | Un salario > 50 000 se toma como error de escala y se divide entre 100. |
 | Productos descontinuados (`activo=false`) | Se conservan marcados. Siguen teniendo ventas y reseñas históricas. |
 | Máscara | `dni` → `***`, `salario` → `NULL`, para quien no pertenece a `electrocasa_ingenieria`. |
-| Modo del conector | **Append only.** Cada fila es un cambio de estado y la historia completa de cada `tracking_id` se necesita para medir tiempos. Con SCD1 no se pierde nada (la llave es `evento_id`), pero append only refleja mejor que la fuente es un log de eventos. |
+| Modo del conector | **SCD Type 1** (MERGE por `evento_id`). Como la llave es `evento_id` y no `tracking_id`, cada cambio de estado queda como una fila propia y no se pierde historia. Además, si un evento se corrige en la fuente, el MERGE lo actualiza en vez de duplicarlo. Los mensajes reprocesados traen otro `evento_id`, así que se eliminan en Silver. |
 
 ---
 
@@ -173,8 +185,8 @@ Todos los rechazos van a **`silver.cuarentena`** con `fuente`, `regla_fallida`, 
 
 | Tabla | Lote 1 | Lote 2 | Lote 3 |
 |---|---|---|---|
-| `bronze.ventas` | ⚠️ | ⚠️ | 18 240 |
-| `bronze.catalogo` | ⚠️ | ⚠️ | 4 705 |
+| `bronze.ventas` | 6 783 | 13 622 | 18 240 |
+| `bronze.catalogo` | 2 305 | 4 705 | 4 705 |
 | `bronze.empleados` | 2 257 | 3 524 | 4 448 |
 | `bronze.resenas` | 5 292 | 9 280 | 9 280 |
 | `bronze.devoluciones` | 1 387 | 3 091 | 4 217 |
@@ -183,12 +195,14 @@ Todos los rechazos van a **`silver.cuarentena`** con `fuente`, `regla_fallida`, 
 | `silver.ventas` | 6 604 | 13 118 | 17 488 |
 | `silver.catalogo` | 2 238 | 2 393 | 2 393 |
 | `silver.empleados` (versiones SCD2) | 2 239 | 3 495 | 4 410 |
-| ↳ versiones cerradas (`__END_AT` no nulo) | 1 019 | 2 081 | ⚠️ |
+| ↳ versiones cerradas (`__END_AT` no nulo) | 1 019 | 2 081 | 2 911 |
 | `silver.resenas` | 5 226 | 9 097 | 9 097 |
 | `silver.devoluciones` | 1 301 | 2 877 | 3 908 |
 | `silver.sucursales` | 40 | 40 | 40 |
-| `silver.tracking_envios` | 15 139 | 15 139 | 15 139 |
+| `silver.tracking_envios` | 15 139 | 15 139 | 15 139 → **15 049** (*) |
 | `silver.cuarentena` | 392 | 796 | 1 004 |
+
+(*) Después de corregir la deduplicación de Tracking, Silver elimina **90 mensajes reprocesados** (15 139 − 15 049).
 
 ### Gold
 
@@ -198,19 +212,30 @@ Todos los rechazos van a **`silver.cuarentena`** con `fuente`, `regla_fallida`, 
 | `gold.top_productos` | 20 | 20 | 20 |
 | `gold.dotacion_mensual` | 320 | 320 | 320 |
 | `gold.ventas_vendedor` | 2 011 | 4 081 | 5 505 |
-| `gold.resenas_negativas` | 25 | 40 | ⚠️ |
-| `gold.despachos_courier` | 4 | 4 | ⚠️ |
+| `gold.resenas_negativas` | 25 | 40 | 40 |
+| `gold.despachos_courier` | 4 | 4 | 3 (*) |
+| `gold.empleados_vigentes` | — | — | 1 138 |
+| `gold.resenas_negativas_origen` | — | — | 24 |
+
+(*) 3 couriers después de estandarizar "Olva" / "Olva Courier". Las dos últimas tablas se agregaron en la corrida final; la validación también confirma **0 estados duplicados** en `silver.tracking_envios`.
 
 Evidencia (salida de `tarea_4_validacion`):
 
 ![Validación lote 1](img/validacion_lote1.png)
 ![Validación lote 2](img/validacion_lote2.png)
 ![Validación lote 3](img/validacion_lote3.png)
+![Validación final con Tracking deduplicado](img/validacion_final.png)
 
 **Lectura de los conteos:**
 
 - `gold.ventas_netas_sucursal_mes` crece 120 → 240 → 320 filas (40 sucursales × 3, 6 y 8 meses): cada lote agrega sus meses.
 - `silver.catalogo` queda en 2 393 aunque `bronze.catalogo` acumule los dos snapshots: los productos repetidos quedan una sola vez.
+- `bronze.catalogo` no cambia en el lote 3 (4 705 = 2 305 del snapshot de marzo + 2 400 del de agosto). Que COPY INTO no vuelva a cargar archivos confirma que es idempotente.
+
+- `bronze.ventas` suma exactamente los 3 archivos (6 783 + 6 839 + 4 618 = 18 240). Silver queda en 17 488 porque descarta las ventas que vuelven a llegar repetidas en el lote siguiente y las que van a cuarentena.
+
+![Bronze catálogo por archivo](img/bronze_catalogo_por_archivo.png)
+![Bronze ventas por archivo](img/bronze_ventas_por_archivo.png)
 - Reseñas no cambia en el lote 3 (9 280 / 9 097) porque solo tiene 2 lotes: no se reprocesan archivos.
 - Las versiones cerradas del SCD2 aumentan con cada lote: las transferencias y los eventos tardíos cierran la versión anterior.
 
@@ -243,19 +268,67 @@ Tracking no tiene rechazos: todos sus estados quedaron estandarizados al conjunt
 | — | Empleados vigentes con máscara (evidencia de masking) | `gold.empleados_vigentes` |
 | — | Reto VARIANT: % de reseñas negativas por origen (`metadata:origen`) | `gold.resenas_negativas_origen` |
 
+### Pregunta 1: ventas netas por sucursal y mes
+
+- **El mes con mayores ventas netas** es el de **S14 ElectroCasa Pueblo Libre en abril 2026**: S/ 356 937.92 brutos − S/ 47 431.13 en devoluciones = **S/ 309 506.79 netos**.
+- En el top 10 hay sucursales de las 4 regiones (Lima, Centro, Norte, Sur). Las devoluciones restan entre un 7 % y un 20 % de las ventas brutas; S25 Cayma (abril) es la más afectada.
+
+![Pregunta 1](img/gold_p1.png)
+
+### Pregunta 2: top 10 por unidades y top 10 por tasa de devolución
+
+- La tabla une los dos rankings, marcados en la columna `ranking_tipo`.
+- Los más vendidos rondan las 25–27 unidades en el período. Entre ellos, **PRD-00125 (Aire acondicionado Bosch Lite 667)** tiene 6 devoluciones en 16 ventas (37.5 %).
+- El top por tasa de devolución lo forman productos con pocas ventas y tasa del 100 % (1 devolución en 1 venta). Es una tasa poco representativa porque la muestra es chica.
+
+![Pregunta 2](img/gold_p2.png)
+
+### Pregunta 3: dotación al cierre de cada mes
+
+- Al 31-oct-2026 lideran **S31 Victor Larco (39 empleados activos)**, S38 Huancayo (38) y S10 Chorrillos (37).
+- El conteo usa la versión SCD2 vigente en cada fecha de corte, así que cada empleado transferido se cuenta en la sucursal donde estaba ese día.
+
+![Pregunta 3](img/gold_p3.png)
+
+### Pregunta 4: ventas por vendedor (sucursal histórica)
+
+- El mes de mayor facturación de un vendedor es el de **EMP-01086 en S21, abril 2026**: S/ 67 529.68 en 9 ventas.
+- `sucursal_historica` es la sucursal que tenía el vendedor en la fecha de cada venta según el SCD2, no la actual. Si no hay una versión vigente en esa fecha, la venta va a `SIN_ASIGNAR`.
+
+![Pregunta 4](img/gold_p4.png)
+
+### Pregunta 5: % de reseñas negativas por categoría y mes
+
+- **Climatización** tiene los peores meses: 21.97 % en mayo y 21.94 % en julio. Le siguen Cocina (21.19 % en mayo) y Línea Blanca (21.07 % en octubre).
+- En general, alrededor de 1 de cada 5 reseñas es negativa (calificación 1 o 2). Las reseñas con calificación inválida o con un producto fuera del catálogo no entran en el cálculo.
+
+![Pregunta 5](img/gold_p5.png)
+
 ### Pregunta 6: despachos por courier
 
 | Courier | Horas promedio (pendiente → entregado) | Entregados | Devueltos | Estado final | % devueltos |
 |---|---:|---:|---:|---:|---:|
-| Olva Courier | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
-| Shalom | 102.43 | 1 399 | 85 | 1 484 | 5.73 |
+| Shalom | **102.43** | 1 399 | 85 | 1 484 | 5.73 |
+| Olva Courier | 103.86 | 1 391 | 85 | 1 476 | 5.76 |
 | Servientrega | 103.83 | 1 363 | 113 | 1 476 | **7.66** |
 
-> ⚠️ Actualizar la tabla después de volver a correr el pipeline. Antes, "Olva" y "Olva Courier" salían como dos couriers distintos y los mensajes reprocesados no se eliminaban (Silver tenía las mismas 15 139 filas que Bronze). Las dos cosas ya están corregidas en `02_silver.py`.
+![Pregunta 6](img/gold_p6_despachos.png)
 
-**Lectura:** los tiempos de entrega son parecidos (unas 102–106 h). Servientrega tiene la mayor tasa de devoluciones (7.66 %).
+**Lectura:**
 
-Capturas de las preguntas 1 a 5: `![gold](img/gold_pX.png)` ⚠️ agregar
+- Shalom es el más rápido (102.4 h) y el que menos devuelve (5.73 %).
+- Los tres couriers tardan casi lo mismo (unas 102–104 h, alrededor de 4,3 días).
+- Servientrega devuelve bastante más que los otros dos (7.66 % contra unos 5.7 %).
+- "Olva" y "Olva Courier" ahora se cuentan como un solo courier.
+
+### Reto VARIANT: % de reseñas negativas por origen
+
+- `metadata` cambia de estructura según el origen. Por ejemplo, `{"origen":"web","navegador":"safari"}` o `{"origen":"app","app":{"version":"5.0.1","so":"ios"}}`.
+- Gold lee el campo con `metadata:origen::string` sobre el `VARIANT`, sin aplanar el JSON.
+- **App** concentra el mayor volumen de reseñas (unas 520–585 al mes) y tuvo el pico de negatividad: **21.18 % en mayo**.
+- **Tienda** tiene menos reseñas, y en marzo la menor negatividad (10.89 %).
+
+![Reto VARIANT](img/gold_variant_origen.png)
 
 ---
 
@@ -280,9 +353,20 @@ REVOKE SELECT ON SCHEMA silver FROM `electrocasa_analistas`;
 SHOW GRANTS ON SCHEMA silver;   -- después
 ```
 
-**Antes:** ⚠️ agregar captura (debe aparecer `electrocasa_analistas | SELECT`).
+**1. Antes (después del GRANT indebido):** `electrocasa_analistas` tiene `SELECT` sobre silver, un privilegio que no le corresponde.
 
-**Después del REVOKE:** solo queda ingeniería; `electrocasa_analistas` ya no tiene acceso a silver.
+| Principal | ActionType | ObjectType | ObjectKey |
+|---|---|---|---|
+| electrocasa_analistas | SELECT | SCHEMA | electrocasa_dev.silver |
+| electrocasa_ingenieria | ALL PRIVILEGES | SCHEMA | electrocasa_dev.silver |
+
+![SHOW GRANTS antes](img/grants_antes.png)
+
+**2. REVOKE ejecutado:**
+
+![REVOKE](img/revoke_ok.png)
+
+**3. Después del REVOKE:** solo queda ingeniería; `electrocasa_analistas` ya no tiene acceso a silver.
 
 | Principal | ActionType | ObjectType | ObjectKey |
 |---|---|---|---|
@@ -309,7 +393,11 @@ PERMISSION_DENIED: User does not have MANAGE on Catalog 'system'. SQLSTATE: 4250
 
 ![Error GRANT system](img/grant_system_error.png)
 
-**Alternativa:** como ni el administrador del workspace tiene `MANAGE` sobre `system`, la evidencia de auditoría es la pestaña **Lineage** de Catalog Explorer. ⚠️ agregar captura `img/lineage.png`
+**Alternativa:** como ni el administrador del workspace tiene `MANAGE` sobre `system`, la evidencia de auditoría es la pestaña **Lineage** de Catalog Explorer.
+
+El lineage de `gold.ventas_vendedor` muestra que se calcula desde `silver.ventas` (materialized view) y `silver.empleados` (streaming table SCD2). Muestra también las columnas de cada tabla y el dueño de cada objeto. Es justo la trazabilidad que necesita el grupo de auditoría.
+
+![Lineage](img/lineage.png)
 
 ### Masking
 
@@ -324,7 +412,9 @@ SELECT id_empleado, dni, salario,
 FROM electrocasa_dev.gold.empleados_vigentes LIMIT 5;
 ```
 
-`![mask](img/mask.png)` ⚠️ agregar captura (debe mostrar `soy_ingenieria = true` y el DNI real)
+**Resultado:** el usuario que consulta es miembro de `electrocasa_ingenieria` (`soy_ingenieria = true`) y ve el **DNI y el salario reales** en una tabla derivada de Gold. Eso confirma que el pipeline, cuyo dueño está en el grupo, no guardó valores ya enmascarados. Un usuario fuera del grupo vería `dni = ***` y `salario = NULL`.
+
+![mask](img/mask.png)
 
 ---
 
@@ -337,7 +427,13 @@ WHERE event_type IN ('flow_progress', 'update_progress')
 ORDER BY timestamp DESC;
 ```
 
-`![event log](img/event_log.png)` ⚠️ agregar. Si `system.lakeflow` no está disponible, pegar aquí el error.
+**Resultado:** el event log del pipeline registra cada flow con su estado (`PLANNING` → `STARTING` → `RUNNING` → `COMPLETED`) y sus métricas de tiempo. Por ejemplo, `silver.cuarentena` terminó *COMPLETED*, y luego arrancaron `gold.ventas_netas_sucursal_mes` y `gold.top_productos`. Se usó el event log porque es la fuente de monitoreo que se puede consultar directamente sobre las tablas del pipeline.
+
+![event log](img/event_log.png)
+
+**Monitoreo de la corrida del pipeline (UI de Jobs & Pipelines, target `prod`):** la corrida quedó *Completed*, con 0 errores y 0 advertencias. Se ven el grafo Bronze → Silver → Gold, los registros de salida por tabla y las expectativas cumplidas ("1 met").
+
+![Pipeline prod](img/pipeline_prod_run.png)
 
 | Recurso | Compute | Por qué |
 |---|---|---|
@@ -349,5 +445,5 @@ ORDER BY timestamp DESC;
 
 ## 10. Retos extra
 
-- **VARIANT en Reseñas:** `metadata` se guarda como `VARIANT` en `silver.resenas` (con `try_parse_json`). Gold lo usa en `gold.resenas_negativas_origen`, que agrupa por `metadata:origen` (app, web o kiosko).
+- **VARIANT en Reseñas:** `metadata` se guarda como `VARIANT` en `silver.resenas` (con `try_parse_json`). Gold lo usa en `gold.resenas_negativas_origen`, que agrupa por `metadata:origen` (app, web y tienda) y por mes.
 - **Cuarentena con trazabilidad:** cada rechazo guarda la fuente, la regla, el motivo, el registro crudo, el archivo o lote y la fecha de procesamiento.
