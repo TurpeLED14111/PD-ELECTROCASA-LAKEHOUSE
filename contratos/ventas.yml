@@ -34,7 +34,8 @@ columnas:
   - nombre: metodo_pago
     tipo: "string"
     nulo: false
-    valores_permitidos: ["EFECTIVO", "TARJETA_CREDITO", "TARJETA_DEBITO", "TRANSFERENCIA", "BILLETERA_DIGITAL"]
+    valores_permitidos: ["EFECTIVO", "TARJETA", "YAPE", "PLIN", "TRANSFERENCIA"]
+    mapeo: "efectivo/Efectivo/EFECTIVO/EFV -> EFECTIVO; tarjeta/TARJETA/Tarjeta de credito/TC/td -> TARJETA; yape/Yape/YAPE -> YAPE; Plin/PLIN -> PLIN; transferencia/Transferencia/TRF -> TRANSFERENCIA"
   - nombre: fecha_venta
     tipo: "timestamp"
     nulo: false

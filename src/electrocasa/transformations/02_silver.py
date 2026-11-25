@@ -70,12 +70,13 @@ def silver_catalogo():
 def limpiar_ventas_base():
     df = spark.read.table("bronze.ventas")
     mp = F.upper(F.trim(F.col("metodo_pago")))
+
     mp_std = (
-        F.when(mp.isin("EFECTIVO", "EFV", "CASH", "EFECT"), "EFECTIVO")
-        .when(mp.isin("TC", "TARJETA CREDITO", "TARJETA_CREDITO", "CREDITO", "TARJETA DE CREDITO"), "TARJETA_CREDITO")
-        .when(mp.isin("TD", "TARJETA DEBITO", "TARJETA_DEBITO", "DEBITO", "TARJETA DE DEBITO", "TARJETA"), "TARJETA_DEBITO")
-        .when(mp.isin("TRANSFERENCIA", "TRANSF", "TRANSFERENCIA BANCARIA"), "TRANSFERENCIA")
-        .when(mp.isin("YAPE", "PLIN", "BILLETERA", "BILLETERA_DIGITAL", "BILLETERA DIGITAL"), "BILLETERA_DIGITAL")
+        F.when(mp.isin("EFECTIVO", "EFV"), "EFECTIVO")
+        .when(mp.isin("TARJETA", "TARJETA DE CREDITO", "TC", "TD"), "TARJETA")
+        .when(mp == "YAPE", "YAPE")
+        .when(mp == "PLIN", "PLIN")
+        .when(mp.isin("TRANSFERENCIA", "TRF"), "TRANSFERENCIA")
         .otherwise("OTRO")
     )
     canal_std = F.when(F.lower(F.trim(F.col("canal"))).like("%ecom%"), "ECOMMERCE").otherwise("TIENDA_FISICA")
@@ -94,7 +95,8 @@ def limpiar_ventas_base():
 @dp.materialized_view(name="silver.ventas", comment="Ventas limpias y deduplicadas")
 @dp.expect_or_drop("monto_positivo", "venta_id IS NOT NULL AND sucursal_id IS NOT NULL AND cantidad > 0 AND monto_total > 0 AND fecha_venta IS NOT NULL")
 def silver_ventas():
-    df = limpiar_ventas_base().filter("venta_id IS NOT NULL AND sucursal_id IS NOT NULL AND cantidad > 0 AND monto_total > 0 AND fecha_venta IS NOT NULL")
+
+    df = limpiar_ventas_base()
     w = Window.partitionBy("venta_id").orderBy(F.col("_ingested_at").asc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn", "_ingested_at", "_source_file")
 
@@ -117,9 +119,7 @@ def vw_devoluciones_enriquecidas():
 @dp.materialized_view(name="silver.devoluciones", comment="Devoluciones validadas contra venta origen")
 @dp.expect_or_drop("reembolso_valido", "devolucion_id IS NOT NULL AND venta_id IS NOT NULL AND monto_venta_origen IS NOT NULL AND monto_reembolso >= 0 AND monto_reembolso <= monto_venta_origen AND fecha_devolucion IS NOT NULL")
 def silver_devoluciones():
-    df = dp.read("vw_devoluciones_enriquecidas").filter(
-        "devolucion_id IS NOT NULL AND venta_id IS NOT NULL AND monto_venta_origen IS NOT NULL AND monto_reembolso >= 0 AND monto_reembolso <= monto_venta_origen AND fecha_devolucion IS NOT NULL"
-    )
+    df = dp.read("vw_devoluciones_enriquecidas")
     w = Window.partitionBy("devolucion_id").orderBy(F.col("_ingested_at").asc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn", "_ingested_at", "_source_file")
 
@@ -138,7 +138,7 @@ def limpiar_resenas_base():
 @dp.materialized_view(name="silver.resenas", comment="Reseñas limpias con metadata como VARIANT")
 @dp.expect_or_drop("calificacion_en_escala", "resena_id IS NOT NULL AND calificacion BETWEEN 1 AND 5 AND fecha_resena IS NOT NULL")
 def silver_resenas():
-    df = limpiar_resenas_base().filter("resena_id IS NOT NULL AND calificacion BETWEEN 1 AND 5 AND fecha_resena IS NOT NULL")
+    df = limpiar_resenas_base()
     w = Window.partitionBy("resena_id").orderBy(F.col("_ingested_at").asc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn", "_ingested_at", "_source_file")
 
@@ -171,9 +171,8 @@ def limpiar_tracking_base():
 @dp.materialized_view(name="silver.tracking_envios", comment="Eventos de despacho estandarizados y sin mensajes reprocesados")
 @dp.expect_or_drop("estado_conocido", "evento_id IS NOT NULL AND estado_entrega IN ('pendiente', 'en_transito', 'entregado', 'devuelto')")
 def silver_tracking():
-    df = limpiar_tracking_base().filter("evento_id IS NOT NULL AND estado_entrega IN ('pendiente', 'en_transito', 'entregado', 'devuelto')")
-    # Un mensaje reprocesado es el mismo cambio de estado con otro evento_id y otra fecha_modificacion
-    # (es el momento en que entró a la base). Se conserva el primer registro de cada estado por envío.
+    df = limpiar_tracking_base()
+
     w = Window.partitionBy("tracking_id", "estado_entrega").orderBy(F.col("fecha_modificacion").asc(), F.col("evento_id").asc())
     return df.withColumn("_rn", F.row_number().over(w)).filter("_rn = 1").drop("_rn")
 
@@ -206,7 +205,6 @@ def vw_empleados_limpios():
         .withColumn("tipo_evento", ev_std)
         .withColumn("fecha_evento", f_ev)
         .withColumn("fecha_registro", F.coalesce(f_reg, f_ev.cast("timestamp")))
-        .filter("id_empleado IS NOT NULL AND fecha_evento IS NOT NULL")
         .withColumn("_seq_orden", F.struct(F.col("fecha_evento"), F.col("fecha_registro")))
         .select("id_empleado", "nombre", "dni", "email", "salario", "sucursal_id", "cargo", "tipo_evento", "fecha_evento", "fecha_registro", "_seq_orden")
     )
@@ -238,6 +236,7 @@ dp.create_auto_cdc_flow(
     stored_as_scd_type=2,
     except_column_list=["_seq_orden"]
 )
+
 
 @dp.materialized_view(name="silver.cuarentena", comment="Registro auditable de filas rechazadas por reglas de calidad")
 def silver_cuarentena():

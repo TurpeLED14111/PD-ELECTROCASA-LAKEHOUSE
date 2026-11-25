@@ -22,6 +22,7 @@ Plataforma de datos sobre Databricks (Unity Catalog) para ElectroCasa, una caden
                         silver.cuarentena (rechazos consultables)
                           │
                 GOLD    6 materialized views (una por pregunta)
+                        + empleados_vigentes (MASK) + resenas_negativas_origen (VARIANT)
                           │
                 VALIDACIÓN  conteos + rechazos + falla si Gold vacío
 ```
@@ -55,15 +56,18 @@ El conector de Tracking y el pipeline principal corren en secuencia, porque Free
 ├── resources/
 │   ├── electrocasa_pipeline.yml    # Pipeline Medallion
 │   └── electrocasa_job.yml         # Job de 4 tareas
-├── src/electrocasa/transformations/
-│   ├── 01_bronze.py                # Auto Loader
-│   ├── 02_silver.py                # Limpieza, expectativas, SCD2, cuarentena
-│   └── 03_gold.py                  # 6 preguntas de negocio
+├── src/electrocasa/
+│   ├── transformations/
+│   │   ├── 01_bronze.py            # Auto Loader
+│   │   ├── 02_silver.py            # Limpieza, expectativas, SCD2, cuarentena
+│   │   └── 03_gold.py              # 6 preguntas de negocio + masking + VARIANT
+│   └── utils/                      # Consultas de verificación y notas de las funciones de limpieza
 ├── notebooks/
 │   ├── 00_setup.ipynb              # Catálogo, schemas, volume, máscaras, GRANT/REVOKE
 │   ├── 01_copy_into_bronze.ipynb   # COPY INTO idempotente
 │   └── 02_validacion.ipynb         # Conteos, rechazos, falla si Gold vacío
-└── contratos/                      # 7 contratos de datos (YAML)
+├── contratos/                      # 7 contratos de datos (YAML)
+└── img/                            # Evidencias de ejecución
 ```
 
 ---
@@ -105,7 +109,9 @@ databricks bundle run electrocasa_orquestacion -t dev
 | Tracking | Lakeflow Connect query-based | Obligatorio. Cursor `fecha_modificacion`, PK `evento_id` y solo las columnas necesarias. Destino: `bronze.tracking_envios`. |
 
 - Las fuentes CSV usan un schema explícito (sin `inferSchema`).
-- Las columnas de auditoría son `_ingested_at` y `_source_file` (tomada de `_metadata.file_name`).
+- Las columnas de auditoría son `_ingested_at` (momento de ingesta) y `_source_file` (tomada de `_metadata.file_name`, nunca de `input_file_name()`).
+- El **identificador de lote** viaja en el nombre del archivo (`ventas_lote_02_2026-08-31.csv`, `catalogo_productos_2026-08-01.json`), así que `_source_file` identifica el archivo y el lote a la vez.
+- Bronze no aplica lógica de negocio ni particiona por fecha de negocio: guarda todo como texto, tal como llega.
 
 ### Corridas del conector de Tracking
 
@@ -136,7 +142,20 @@ databricks bundle run electrocasa_orquestacion -t dev
 
 - **Fechas:** pasan a `TIMESTAMP`/`DATE`. Se aceptan los formatos ISO, `dd/MM/yyyy` y `dd/MM/yyyy HH:mm:ss`.
 - **Montos:** coma decimal y punto de miles (`1.234,50`), y precios con moneda, pasan a `decimal(12,2)`.
-- **Conjuntos cerrados:** categoría, método de pago, canal, tipo de evento de Empleados, estado de entrega y courier.
+- **Conjuntos cerrados:**
+
+| Campo | Variantes en la fuente | Valores en Silver |
+|---|---|---|
+| `metodo_pago` | 17 (`EFV`, `TC`, `td`, `Tarjeta de credito`, `TRF`, `Yape`, `PLIN`…) | `EFECTIVO`, `TARJETA`, `YAPE`, `PLIN`, `TRANSFERENCIA` |
+| `categoria` | 17 (`Línea blanca`, `linea_blanca`, `CLIMATIZACION`…) | `LINEA_BLANCA`, `COCINA`, `ELECTRONICA`, `CLIMATIZACION`, `ENTRETENIMIENTO` |
+| `tipo_evento` | 13 (`alta`, `Alta`, `Cambio Salario`, `cese`…) | `ALTA`, `TRANSFERENCIA`, `CAMBIO_SUELDO`, `BAJA` (`cese` → `BAJA`) |
+| `estado_entrega` | `En camino`, `EN_CAMINO`, `en_transito`… | `pendiente`, `en_transito`, `entregado`, `devuelto` |
+| `courier` | `Olva`, `Olva Courier`, casing variable | `Olva Courier`, `Shalom`, `Servientrega` |
+| `canal` | `tienda_fisica`, `ecommerce` | `TIENDA_FISICA`, `ECOMMERCE` |
+
+Verificación de `metodo_pago`: las 17 variantes quedan en exactamente 5 valores. La suma (3 488 + 3 468 + 3 610 + 3 506 + 3 416 = **17 488**) es igual al total de `silver.ventas`, así que ninguna venta quedó como "OTRO".
+
+![metodo_pago en Silver](img/silver_metodo_pago.png)
 - **Casing:** `ciudad`, `distrito` y `region` de Sucursales.
 - **Deduplicación:** `row_number()` por la llave. Las reingestas no duplican ventas, devoluciones ni reseñas. Los productos repetidos del catálogo quedan una sola vez, con la versión del último snapshot.
 
@@ -153,6 +172,9 @@ databricks bundle run electrocasa_orquestacion -t dev
 | Tracking | `estado_conocido` (pendiente, en_transito, entregado, devuelto) | drop | Un estado desconocido no aporta a la pregunta 6. |
 
 Todos los rechazos van a **`silver.cuarentena`** con `fuente`, `regla_fallida`, `motivo`, `registro_crudo` (JSON), `archivo_lote` y `fecha_procesamiento`.
+
+- **La expectativa es la que descarta.** Las tablas de Silver no aplican un filtro previo con la misma condición, así que las métricas de calidad del pipeline registran cuántas filas descartó cada regla.
+- **Excepción: Catálogo.** Primero se filtran los precios inválidos y después se deduplica. Así, si un producto del snapshot de marzo aparece dos veces y una de las versiones tiene precio inválido, se conserva la válida.
 
 ### SCD Type 2 de Empleados
 
@@ -172,7 +194,7 @@ Todos los rechazos van a **`silver.cuarentena`** con `fuente`, `regla_fallida`, 
 | Tracking con venta inexistente | Se conserva. La pregunta 6 se mide por envío, no por venta. |
 | Mensajes reprocesados de Tracking | Se deduplica por `(tracking_id, estado_entrega)` y se conserva el primer registro por `fecha_modificacion`. El reproceso llega con otro `evento_id` y otra `fecha_modificacion`. |
 | Mismo `dni` en dos empleados | Se conservan los dos. La llave es `id_empleado`, no el `dni`. |
-| Salarios fuera de rango | Un salario > 50 000 se toma como error de escala y se divide entre 100. |
+| Salarios fuera de rango | Un salario > 50 000 se toma como error de escala y se divide entre 100. En la fuente, los salarios normales van de S/ 1 201 a S/ 10 387 (gerentes) y los 18 fuera de rango van de 170 908 a 310 523, es decir, el mismo patrón con dos decimales de más. |
 | Productos descontinuados (`activo=false`) | Se conservan marcados. Siguen teniendo ventas y reseñas históricas. |
 | Máscara | `dni` → `***`, `salario` → `NULL`, para quien no pertenece a `electrocasa_ingenieria`. |
 | Modo del conector | **SCD Type 1** (MERGE por `evento_id`). Como la llave es `evento_id` y no `tracking_id`, cada cambio de estado queda como una fila propia y no se pierde historia. Además, si un evento se corrige en la fuente, el MERGE lo actualiza en vez de duplicarlo. Los mensajes reprocesados traen otro `evento_id`, así que se eliminan en Silver. |
@@ -231,13 +253,14 @@ Evidencia (salida de `tarea_4_validacion`):
 - `gold.ventas_netas_sucursal_mes` crece 120 → 240 → 320 filas (40 sucursales × 3, 6 y 8 meses): cada lote agrega sus meses.
 - `silver.catalogo` queda en 2 393 aunque `bronze.catalogo` acumule los dos snapshots: los productos repetidos quedan una sola vez.
 - `bronze.catalogo` no cambia en el lote 3 (4 705 = 2 305 del snapshot de marzo + 2 400 del de agosto). Que COPY INTO no vuelva a cargar archivos confirma que es idempotente.
-
 - `bronze.ventas` suma exactamente los 3 archivos (6 783 + 6 839 + 4 618 = 18 240). Silver queda en 17 488 porque descarta las ventas que vuelven a llegar repetidas en el lote siguiente y las que van a cuarentena.
+- Bronze coincide exactamente con las filas de los archivos fuente en todas las fuentes. Por ejemplo, empleados: 2 257 + 1 267 + 924 = 4 448, y devoluciones: 1 387 + 1 704 + 1 126 = 4 217.
+- Reseñas no cambia en el lote 3 (9 280 / 9 097) porque solo tiene 2 lotes: no se reprocesan archivos.
+- `silver.empleados` (4 410) = `bronze.empleados` (4 448) − 38 eventos en cuarentena: cada evento válido genera una versión SCD2.
+- Las versiones cerradas del SCD2 aumentan con cada lote (1 019 → 2 081 → 2 911): las transferencias y los eventos tardíos cierran la versión anterior.
 
 ![Bronze catálogo por archivo](img/bronze_catalogo_por_archivo.png)
 ![Bronze ventas por archivo](img/bronze_ventas_por_archivo.png)
-- Reseñas no cambia en el lote 3 (9 280 / 9 097) porque solo tiene 2 lotes: no se reprocesan archivos.
-- Las versiones cerradas del SCD2 aumentan con cada lote: las transferencias y los eventos tardíos cierran la versión anterior.
 
 ### Registros rechazados (`silver.cuarentena`, acumulado)
 
@@ -447,3 +470,12 @@ ORDER BY timestamp DESC;
 
 - **VARIANT en Reseñas:** `metadata` se guarda como `VARIANT` en `silver.resenas` (con `try_parse_json`). Gold lo usa en `gold.resenas_negativas_origen`, que agrupa por `metadata:origen` (app, web y tienda) y por mes.
 - **Cuarentena con trazabilidad:** cada rechazo guarda la fuente, la regla, el motivo, el registro crudo, el archivo o lote y la fecha de procesamiento.
+  - **Reprocesamiento:** Bronze conserva los datos crudos, y `silver.cuarentena` y las tablas de Silver son materialized views calculadas desde Bronze. Para reprocesar un rechazo, se corrige el dato en origen (un archivo corregido que llega en un lote nuevo) o se ajusta la regla de limpieza. En el siguiente refresh del pipeline, la fila se vuelve a evaluar: si ya cumple, pasa a Silver y sale de la cuarentena, sin tocar a mano ninguna tabla.
+  - Consulta para auditar los rechazos de un lote:
+
+    ```sql
+    SELECT fuente, regla_fallida, archivo_lote, COUNT(*) AS filas
+    FROM electrocasa_dev.silver.cuarentena
+    GROUP BY ALL ORDER BY fuente, archivo_lote;
+    ```
+
